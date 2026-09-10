@@ -1,8 +1,14 @@
 import streamlit as st
-import numpy as np
 import cv2
+import numpy as np
 from PIL import Image
 from io import BytesIO
+from datetime import datetime
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Virtual Fundus Camera",
@@ -10,486 +16,498 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# ============================================================
+# TITLE
+# ============================================================
+
 st.title("👁️ Virtual Fundus Camera")
-st.caption("Phase 1 — Virtual retinal imaging simulator")
+
+st.caption(
+    "Phase 1 – Fundus Image Capture & Processing"
+)
 
 st.warning(
-    "Educational/research simulation only. "
-    "This is not a medical diagnostic system."
+    "Educational / research prototype only. "
+    "This application is not intended for medical diagnosis."
 )
 
 
-# =========================================================
-# CREATE SIMULATED RETINA
-# =========================================================
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-def create_retina(
-    size=700,
-    illumination=1.0,
-    blur=0.0,
-    exposure=1.0,
-    vessel_strength=1.0
-):
+if "captured_image" not in st.session_state:
+    st.session_state.captured_image = None
 
-    img = np.zeros(
-        (size, size, 3),
-        dtype=np.float32
-    )
+if "capture_count" not in st.session_state:
+    st.session_state.capture_count = 0
 
-    y, x = np.mgrid[0:size, 0:size]
 
-    cx = size // 2
-    cy = size // 2
+# ============================================================
+# IMAGE PROCESSING FUNCTIONS
+# ============================================================
 
-    # -----------------------------------------------------
-    # Circular fundus field
-    # -----------------------------------------------------
+def decode_image(image_bytes):
 
-    distance = np.sqrt(
-        (x - cx) ** 2 +
-        (y - cy) ** 2
-    )
-
-    radius = size * 0.43
-
-    mask = distance < radius
-
-    # -----------------------------------------------------
-    # Basic retinal background
-    # -----------------------------------------------------
-
-    radial = 1 - distance / radius
-    radial = np.clip(radial, 0, 1)
-
-    base = (
-        75
-        + 80 * radial
-    )
-
-    # Slight natural variation
-    noise = np.random.normal(
-        0,
-        5,
-        (size, size)
-    )
-
-    red = base + noise
-    green = base * 0.45 + noise
-    blue = base * 0.25 + noise
-
-    img[:, :, 0] = red
-    img[:, :, 1] = green
-    img[:, :, 2] = blue
-
-    # -----------------------------------------------------
-    # Optic disc
-    # -----------------------------------------------------
-
-    optic_x = int(cx + size * 0.20)
-    optic_y = int(cy - size * 0.02)
-
-    cv2.ellipse(
-        img,
-        (optic_x, optic_y),
-        (
-            int(size * 0.07),
-            int(size * 0.10)
-        ),
-        -15,
-        0,
-        360,
-        (210, 145, 120),
-        -1
-    )
-
-    # -----------------------------------------------------
-    # Macula
-    # -----------------------------------------------------
-
-    macula_x = int(cx - size * 0.13)
-    macula_y = int(cy)
-
-    cv2.circle(
-        img,
-        (macula_x, macula_y),
-        int(size * 0.035),
-        (45, 25, 20),
-        -1
-    )
-
-    # -----------------------------------------------------
-    # Blood vessels
-    # -----------------------------------------------------
-
-    vessel_img = np.zeros(
-        (size, size),
+    image_array = np.frombuffer(
+        image_bytes,
         dtype=np.uint8
     )
 
-    vessel_color = int(
-        120 * vessel_strength
+    image = cv2.imdecode(
+        image_array,
+        cv2.IMREAD_COLOR
     )
 
-    # Main vessels
-    directions = [
-        (-1, -0.35),
-        (-1, 0.35),
-        (-0.75, -0.65),
-        (-0.75, 0.65),
-        (-0.45, -0.85),
-        (-0.45, 0.85),
-    ]
-
-    for dx, dy in directions:
-
-        points = []
-
-        start_x = optic_x
-        start_y = optic_y
-
-        for i in range(15):
-
-            t = i / 14
-
-            px = int(
-                start_x +
-                dx * size * 0.42 * t
-            )
-
-            py = int(
-                start_y +
-                dy * size * 0.42 * t
-            )
-
-            # curved vessel
-            py += int(
-                np.sin(t * 8) *
-                size * 0.025
-            )
-
-            points.append(
-                (px, py)
-            )
-
-        pts = np.array(
-            points,
-            dtype=np.int32
+    if image is None:
+        raise ValueError(
+            "Unable to read the captured image."
         )
 
-        cv2.polylines(
-            vessel_img,
-            [pts],
-            False,
-            vessel_color,
-            max(2, int(size * 0.006))
-        )
-
-        # Smaller branches
-        for j in range(2, 5):
-
-            idx = min(
-                j * 3,
-                len(points) - 1
-            )
-
-            sx, sy = points[idx]
-
-            ex = sx + int(
-                dx * size * 0.18
-            )
-
-            ey = sy + int(
-                dy * size * 0.18
-            )
-
-            cv2.line(
-                vessel_img,
-                (sx, sy),
-                (ex, ey),
-                vessel_color,
-                max(1, int(size * 0.003))
-            )
-
-    vessel_img = cv2.GaussianBlur(
-        vessel_img,
-        (5, 5),
-        0
-    )
-
-    vessel_effect = (
-        vessel_img.astype(np.float32)
-        * vessel_strength
-    )
-
-    img[:, :, 0] -= vessel_effect * 0.40
-    img[:, :, 1] -= vessel_effect * 0.25
-    img[:, :, 2] -= vessel_effect * 0.20
-
-    # -----------------------------------------------------
-    # Camera illumination falloff
-    # -----------------------------------------------------
-
-    illumination_map = (
-        0.65 +
-        0.35 * radial
-    )
-
-    img *= illumination_map[:, :, None]
-
-    # -----------------------------------------------------
-    # Exposure
-    # -----------------------------------------------------
-
-    img *= exposure
-    img *= illumination
-
-    # -----------------------------------------------------
-    # Circular mask
-    # -----------------------------------------------------
-
-    img[~mask] = 0
-
-    img = np.clip(
-        img,
-        0,
-        255
-    ).astype(np.uint8)
-
-    # -----------------------------------------------------
-    # Focus simulation
-    # -----------------------------------------------------
-
-    if blur > 0:
-
-        kernel = int(
-            blur * 2 + 1
-        )
-
-        if kernel % 2 == 0:
-            kernel += 1
-
-        img = cv2.GaussianBlur(
-            img,
-            (kernel, kernel),
-            0
-        )
-
-    return img
+    return image
 
 
-# =========================================================
-# SIDEBAR CONTROLS
-# =========================================================
+def enhance_image(image):
 
-st.sidebar.header("Virtual Camera Controls")
-
-illumination = st.sidebar.slider(
-    "Illumination",
-    0.3,
-    2.0,
-    1.0,
-    0.05
-)
-
-exposure = st.sidebar.slider(
-    "Exposure",
-    0.5,
-    2.0,
-    1.0,
-    0.05
-)
-
-focus = st.sidebar.slider(
-    "Focus / Blur",
-    0.0,
-    8.0,
-    0.0,
-    0.5
-)
-
-vessel_strength = st.sidebar.slider(
-    "Vessel Visibility",
-    0.3,
-    2.0,
-    1.0,
-    0.1
-)
-
-image_size = st.sidebar.selectbox(
-    "Resolution",
-    [512, 700, 900],
-    index=1
-)
-
-
-# =========================================================
-# GENERATE IMAGE
-# =========================================================
-
-if "fundus" not in st.session_state:
-
-    st.session_state.fundus = create_retina(
-        size=image_size
-    )
-
-
-if st.sidebar.button(
-    "🔄 Generate New Retina"
-):
-
-    st.session_state.fundus = create_retina(
-        size=image_size,
-        illumination=illumination,
-        blur=focus,
-        exposure=exposure,
-        vessel_strength=vessel_strength
-    )
-
-
-# =========================================================
-# DISPLAY
-# =========================================================
-
-image = create_retina(
-    size=image_size,
-    illumination=illumination,
-    blur=focus,
-    exposure=exposure,
-    vessel_strength=vessel_strength
-)
-
-
-col1, col2 = st.columns(2)
-
-
-with col1:
-
-    st.subheader("Virtual Fundus View")
-
-    st.image(
+    lab = cv2.cvtColor(
         image,
-        use_container_width=True
+        cv2.COLOR_BGR2LAB
     )
 
+    l, a, b = cv2.split(lab)
 
-with col2:
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
 
-    st.subheader("Camera Information")
+    l = clahe.apply(l)
 
-    mean_brightness = np.mean(image)
+    enhanced = cv2.merge(
+        (l, a, b)
+    )
+
+    enhanced = cv2.cvtColor(
+        enhanced,
+        cv2.COLOR_LAB2BGR
+    )
+
+    return enhanced
+
+
+def circular_crop(image):
+
+    h, w = image.shape[:2]
+
+    center_x = w // 2
+    center_y = h // 2
+
+    radius = int(
+        min(h, w) * 0.45
+    )
+
+    mask = np.zeros(
+        (h, w),
+        dtype=np.uint8
+    )
+
+    cv2.circle(
+        mask,
+        (center_x, center_y),
+        radius,
+        255,
+        -1
+    )
+
+    result = cv2.bitwise_and(
+        image,
+        image,
+        mask=mask
+    )
+
+    return result
+
+
+def calculate_quality(image):
 
     gray = cv2.cvtColor(
         image,
-        cv2.COLOR_RGB2GRAY
+        cv2.COLOR_BGR2GRAY
     )
 
-    sharpness = cv2.Laplacian(
-        gray,
-        cv2.CV_64F
-    ).var()
-
-    st.metric(
-        "Brightness",
-        f"{mean_brightness:.1f}"
+    brightness = float(
+        np.mean(gray)
     )
 
-    st.metric(
-        "Sharpness",
-        f"{sharpness:.1f}"
+    sharpness = float(
+        cv2.Laplacian(
+            gray,
+            cv2.CV_64F
+        ).var()
     )
 
-    if mean_brightness < 40:
+    if brightness < 40:
+
+        brightness_status = "Too Dark"
+
+    elif brightness > 220:
+
+        brightness_status = "Too Bright"
+
+    else:
+
+        brightness_status = "Good"
+
+    if sharpness < 30:
+
+        focus_status = "Low Focus"
+
+    else:
+
+        focus_status = "Good"
+
+    if (
+        brightness_status == "Good"
+        and focus_status == "Good"
+    ):
+
+        overall = "GOOD"
+
+    else:
+
+        overall = "RETAKE"
+
+    return (
+        brightness,
+        sharpness,
+        brightness_status,
+        focus_status,
+        overall
+    )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header("⚙️ Image Processing")
+
+enable_enhancement = st.sidebar.checkbox(
+    "Enable Enhancement",
+    value=True
+)
+
+enable_circular_crop = st.sidebar.checkbox(
+    "Circular Fundus Crop",
+    value=False
+)
+
+
+# ============================================================
+# CAPTURE SECTION
+# ============================================================
+
+st.header("📷 Camera")
+
+st.write(
+    "Click **Capture New Image** to open your "
+    "mobile or computer camera."
+)
+
+
+# ------------------------------------------------------------
+# Capture New Image
+# ------------------------------------------------------------
+
+capture = st.camera_input(
+    "Capture New Image",
+    key=f"camera_{st.session_state.capture_count}"
+)
+
+
+# ============================================================
+# WHEN NEW IMAGE IS CAPTURED
+# ============================================================
+
+if capture is not None:
+
+    try:
+
+        # Convert captured image
+        image = decode_image(
+            capture.getvalue()
+        )
+
+        # Store image
+        st.session_state.captured_image = image
+
+        st.session_state.capture_count += 1
+
+    except Exception as e:
 
         st.error(
-            "Image too dark"
+            f"Camera error: {e}"
         )
 
-    elif mean_brightness > 220:
 
-        st.warning(
-            "Image too bright"
+# ============================================================
+# DISPLAY CAPTURED IMAGE
+# ============================================================
+
+if st.session_state.captured_image is not None:
+
+    image = st.session_state.captured_image
+
+    st.divider()
+
+    st.header("📸 Captured Fundus Image")
+
+    col1, col2 = st.columns(2)
+
+
+    # ========================================================
+    # ORIGINAL IMAGE
+    # ========================================================
+
+    with col1:
+
+        st.subheader(
+            "Original Capture"
         )
 
-    elif sharpness < 20:
+        original_rgb = cv2.cvtColor(
+            image,
+            cv2.COLOR_BGR2RGB
+        )
 
-        st.warning(
-            "Image appears out of focus"
+        st.image(
+            original_rgb,
+            use_container_width=True
+        )
+
+
+    # ========================================================
+    # PROCESS IMAGE
+    # ========================================================
+
+    processed = image.copy()
+
+
+    if enable_circular_crop:
+
+        processed = circular_crop(
+            processed
+        )
+
+
+    if enable_enhancement:
+
+        processed = enhance_image(
+            processed
+        )
+
+
+    # ========================================================
+    # PROCESSED IMAGE
+    # ========================================================
+
+    with col2:
+
+        st.subheader(
+            "Processed Image"
+        )
+
+        processed_rgb = cv2.cvtColor(
+            processed,
+            cv2.COLOR_BGR2RGB
+        )
+
+        st.image(
+            processed_rgb,
+            use_container_width=True
+        )
+
+
+    # ========================================================
+    # IMAGE QUALITY
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "🔍 Image Quality"
+    )
+
+    (
+        brightness,
+        sharpness,
+        brightness_status,
+        focus_status,
+        overall
+    ) = calculate_quality(
+        processed
+    )
+
+
+    q1, q2, q3, q4 = st.columns(4)
+
+
+    with q1:
+
+        st.metric(
+            "Brightness",
+            f"{brightness:.1f}"
+        )
+
+
+    with q2:
+
+        st.metric(
+            "Sharpness",
+            f"{sharpness:.1f}"
+        )
+
+
+    with q3:
+
+        st.metric(
+            "Brightness Status",
+            brightness_status
+        )
+
+
+    with q4:
+
+        st.metric(
+            "Overall",
+            overall
+        )
+
+
+    if overall == "GOOD":
+
+        st.success(
+            "✓ Image quality is acceptable."
         )
 
     else:
 
-        st.success(
-            "Image quality acceptable"
+        st.warning(
+            "⚠️ Image should be captured again."
         )
 
 
-# =========================================================
-# CAPTURE
-# =========================================================
+    # ========================================================
+    # RETAKE BUTTON
+    # ========================================================
 
-st.divider()
+    st.divider()
 
-st.subheader("📸 Capture Image")
-
-if st.button(
-    "Capture Fundus Image"
-):
-
-    st.session_state.captured = image
-
-    st.success(
-        "Fundus image captured"
+    st.header(
+        "🔄 Capture Again"
     )
 
-
-if "captured" in st.session_state:
-
-    captured = st.session_state.captured
-
-    st.image(
-        captured,
-        caption="Captured Fundus Image",
+    if st.button(
+        "🔄 Retake Image",
         use_container_width=True
+    ):
+
+        st.session_state.captured_image = None
+
+        st.session_state.capture_count += 1
+
+        st.rerun()
+
+
+    # ========================================================
+    # SAVE IMAGE
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "💾 Save Image"
     )
 
-    pil_image = Image.fromarray(
-        captured
-    )
 
-    buffer = BytesIO()
-
-    pil_image.save(
-        buffer,
-        format="JPEG",
-        quality=95
-    )
-
-    st.download_button(
-        label="⬇️ Save Fundus Image",
-        data=buffer.getvalue(),
-        file_name="virtual_fundus.jpg",
-        mime="image/jpeg"
+    success, encoded = cv2.imencode(
+        ".jpg",
+        processed
     )
 
 
-# =========================================================
-# NEXT STAGE
-# =========================================================
+    if success:
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        filename = (
+            f"fundus_{timestamp}.jpg"
+        )
+
+        st.download_button(
+            label="⬇️ Download Fundus Image",
+            data=encoded.tobytes(),
+            file_name=filename,
+            mime="image/jpeg",
+            use_container_width=True
+        )
+
+
+# ============================================================
+# NO IMAGE YET
+# ============================================================
+
+else:
+
+    st.info(
+        "📷 No image captured yet. "
+        "Click **Capture New Image** above to start."
+    )
+
+
+# ============================================================
+# FUTURE AI SECTION
+# ============================================================
 
 st.divider()
 
-st.subheader(
-    "🚀 Phase 2 — AI Integration"
+st.header(
+    "🤖 AI Analysis – Coming in Phase 2"
 )
 
 st.write(
     """
-    The next stage can connect this virtual fundus camera
-    to a deep-learning model for retinal image quality
-    assessment and research classification.
+    After the camera capture and image-quality pipeline
+    is working correctly, we can connect a deep-learning
+    model for retinal image analysis.
     """
 )
 
-st.info(
-    "Normal → Image Quality → AI Model → Research Result"
+
+st.markdown(
+    """
+    **Planned pipeline**
+
+    Camera
+    → Fundus Image
+    → Image Quality Check
+    → OpenCV Processing
+    → Deep Learning Model
+    → Research Result
+    """
+)
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Virtual Fundus Camera V1 | "
+    "Educational / Research Prototype"
 )
